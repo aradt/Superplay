@@ -24,6 +24,9 @@ public static class Defaults
     /// <summary>Full WebSocket URL the client connects to by default.</summary>
     public const string ClientWebSocketUrl = "ws://localhost:5000/ws";
 
+    /// <summary>Maximum allowed balance per resource. Prevents integer overflow.</summary>
+    public const long MaxResourceBalance = 1_000_000_000_000;
+
     /// <summary>Default idempotency TTL in seconds (5 minutes).</summary>
     public const int IdempotencyTtlSeconds = 300;
 

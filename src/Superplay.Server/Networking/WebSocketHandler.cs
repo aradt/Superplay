@@ -72,9 +72,18 @@ public sealed class WebSocketHandler
                     var loginResponse = response.DeserializePayload<LoginResponse>();
                     if (loginResponse is not null)
                     {
-                        playerId = loginResponse.PlayerId;
-                        _connectionManager.TryAdd(playerId, socket);
-                        _logger.LogInformation("Player {PlayerId} registered in connection manager", playerId);
+                        // TryAdd is the atomic gate — if another connection registered
+                        // the same player between the handler check and now, reject it.
+                        if (!_connectionManager.TryAdd(loginResponse.PlayerId, socket))
+                        {
+                            _logger.LogWarning("Player {PlayerId} was registered by another connection (race condition), rejecting", loginResponse.PlayerId);
+                            response = MessageEnvelope.ErrorResponse("LoginResponse", $"Player {loginResponse.PlayerId} is already connected");
+                        }
+                        else
+                        {
+                            playerId = loginResponse.PlayerId;
+                            _logger.LogInformation("Player {PlayerId} registered in connection manager", playerId);
+                        }
                     }
                 }
 

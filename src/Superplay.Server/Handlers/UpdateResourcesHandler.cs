@@ -57,6 +57,12 @@ public sealed class UpdateResourcesHandler : IMessageHandler
                 $"Insufficient {request.ResourceType}: update of {request.ResourceValue} would result in a negative balance");
         }
 
+        if (newBalance == -2)
+        {
+            throw new InvalidOperationException(
+                $"{request.ResourceType} update of {request.ResourceValue} would exceed the maximum allowed balance");
+        }
+
         _logger.LogInformation(
             "Player {PlayerId} updated {ResourceType} by {Delta}, new balance: {NewBalance}",
             playerId, request.ResourceType, request.ResourceValue, newBalance);

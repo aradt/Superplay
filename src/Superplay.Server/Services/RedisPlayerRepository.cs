@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
+using Superplay.Shared;
 using Superplay.Shared.Enums;
 
 namespace Superplay.Server.Services;
@@ -19,29 +20,38 @@ public sealed class RedisPlayerRepository : IPlayerRepository
     private readonly IConnectionMultiplexer _redis;
     private readonly ILogger<RedisPlayerRepository> _logger;
 
-    // Lua script for atomic resource update with floor of zero:
+    // Lua script for atomic resource update with floor of zero and max cap:
     // KEYS[1] = player hash
-    // ARGV[1] = resource field name, ARGV[2] = delta
-    // Returns: new balance, or -1 if the update would go below zero
+    // ARGV[1] = resource field name, ARGV[2] = delta, ARGV[3] = max balance
+    // Returns: new balance, -1 if would go below zero, -2 if would exceed max
     private const string UpdateScript = """
         local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
         local delta = tonumber(ARGV[2])
+        local maxBalance = tonumber(ARGV[3])
         local newBalance = current + delta
         if newBalance < 0 then
             return -1
+        end
+        if newBalance > maxBalance then
+            return -2
         end
         return redis.call('HINCRBY', KEYS[1], ARGV[1], delta)
         """;
 
     // Lua script for atomic gift transfer:
     // KEYS[1] = sender player hash, KEYS[2] = recipient player hash
-    // ARGV[1] = resource field name, ARGV[2] = transfer amount
-    // Returns: { senderNewBalance, recipientNewBalance } or -1 if insufficient funds
+    // ARGV[1] = resource field name, ARGV[2] = transfer amount, ARGV[3] = max balance
+    // Returns: { senderNewBalance, recipientNewBalance }, {-1,-1} insufficient, {-2,-2} recipient overflow
     private const string TransferScript = """
         local senderBalance = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
+        local recipientBalance = tonumber(redis.call('HGET', KEYS[2], ARGV[1]) or '0')
         local amount = tonumber(ARGV[2])
+        local maxBalance = tonumber(ARGV[3])
         if senderBalance < amount then
             return {-1, -1}
+        end
+        if recipientBalance + amount > maxBalance then
+            return {-2, -2}
         end
         local senderNew = redis.call('HINCRBY', KEYS[1], ARGV[1], -amount)
         local recipientNew = redis.call('HINCRBY', KEYS[2], ARGV[1], amount)
@@ -117,15 +127,15 @@ public sealed class RedisPlayerRepository : IPlayerRepository
 
     /// <inheritdoc />
     /// <remarks>
-    /// Uses a Lua script to atomically check that the balance won't go below zero before applying the delta.
-    /// Returns -1 if the update would result in a negative balance.
+    /// Uses a Lua script to atomically check bounds before applying the delta.
+    /// Returns -1 if would go below zero, -2 if would exceed max balance.
     /// </remarks>
     public async Task<long> UpdateResourceAsync(string playerId, ResourceType resourceType, long delta, CancellationToken cancellationToken = default)
     {
         var result = (long)await Db.ScriptEvaluateAsync(
             UpdateScript,
             new RedisKey[] { PlayerKey(playerId) },
-            new RedisValue[] { ResourceField(resourceType), delta });
+            new RedisValue[] { ResourceField(resourceType), delta, Defaults.MaxResourceBalance });
 
         if (result == -1)
         {
@@ -133,6 +143,14 @@ public sealed class RedisPlayerRepository : IPlayerRepository
                 "Update rejected: player {PlayerId} {ResourceType} would go below zero (delta={Delta})",
                 playerId, resourceType, delta);
             return -1;
+        }
+
+        if (result == -2)
+        {
+            _logger.LogWarning(
+                "Update rejected: player {PlayerId} {ResourceType} would exceed max balance (delta={Delta})",
+                playerId, resourceType, delta);
+            return -2;
         }
 
         _logger.LogDebug(
@@ -153,9 +171,17 @@ public sealed class RedisPlayerRepository : IPlayerRepository
         var result = await Db.ScriptEvaluateAsync(
             TransferScript,
             new RedisKey[] { PlayerKey(fromPlayerId), PlayerKey(toPlayerId) },
-            new RedisValue[] { ResourceField(resourceType), amount });
+            new RedisValue[] { ResourceField(resourceType), amount, Defaults.MaxResourceBalance });
 
         var results = (long[])result!;
+
+        if (results[0] == -2)
+        {
+            _logger.LogWarning(
+                "Gift transfer failed: recipient {ToPlayerId} would exceed max {ResourceType} balance",
+                toPlayerId, resourceType);
+            return null;
+        }
 
         if (results[0] == -1)
         {

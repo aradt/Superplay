@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Superplay.Shared;
 using Superplay.Shared.Enums;
 
 namespace Superplay.Server.Services;
@@ -110,15 +111,14 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
         await using var db = CreateDbContext();
         var fieldName = ResourceField(resourceType);
 
-        // Conditional update: only apply if result >= 0
+        // Conditional update: only apply if result >= 0 and <= max balance
         var rowsAffected = await db.Database.ExecuteSqlRawAsync(
-            "UPDATE Players SET " + fieldName + " = " + fieldName + " + {0} WHERE PlayerId = {1} AND " + fieldName + " + {0} >= 0",
-            new object[] { delta, playerId },
+            "UPDATE Players SET " + fieldName + " = " + fieldName + " + {0} WHERE PlayerId = {1} AND " + fieldName + " + {0} >= 0 AND " + fieldName + " + {0} <= {2}",
+            new object[] { delta, playerId, Defaults.MaxResourceBalance },
             cancellationToken);
 
         if (rowsAffected == 0)
         {
-            // Check if player exists to distinguish "not found" from "would go negative"
             var exists = await db.Players.AsNoTracking().AnyAsync(p => p.PlayerId == playerId, cancellationToken);
             if (!exists)
             {
@@ -126,10 +126,24 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
                 return 0;
             }
 
+            // Check which bound was violated
+            var current = await db.Players.AsNoTracking()
+                .Where(p => p.PlayerId == playerId)
+                .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (current + delta < 0)
+            {
+                _logger.LogWarning(
+                    "Update rejected: player {PlayerId} {ResourceType} would go below zero (delta={Delta})",
+                    playerId, resourceType, delta);
+                return -1;
+            }
+
             _logger.LogWarning(
-                "Update rejected: player {PlayerId} {ResourceType} would go below zero (delta={Delta})",
+                "Update rejected: player {PlayerId} {ResourceType} would exceed max balance (delta={Delta})",
                 playerId, resourceType, delta);
-            return -1;
+            return -2;
         }
 
         var newBalance = await db.Players
@@ -170,6 +184,20 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
                 _logger.LogWarning(
                     "Gift transfer failed: player {FromPlayerId} has insufficient {ResourceType} (requested {Amount}, has {Balance})",
                     fromPlayerId, resourceType, amount, senderBalance);
+                await transaction.RollbackAsync(cancellationToken);
+                return null;
+            }
+
+            var recipientBalance = await db.Players
+                .Where(p => p.PlayerId == toPlayerId)
+                .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (recipientBalance + amount > Defaults.MaxResourceBalance)
+            {
+                _logger.LogWarning(
+                    "Gift transfer failed: recipient {ToPlayerId} would exceed max {ResourceType} balance",
+                    toPlayerId, resourceType);
                 await transaction.RollbackAsync(cancellationToken);
                 return null;
             }
