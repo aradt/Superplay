@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Superplay.Server.Routing;
+using Superplay.Server.Services;
 using Superplay.Shared.Messages;
 
 namespace Superplay.Server.Networking;
@@ -16,6 +17,7 @@ public sealed class WebSocketHandler
 {
     private readonly MessageRouter _router;
     private readonly IConnectionManager _connectionManager;
+    private readonly IIdempotencyStore _idempotencyStore;
     private readonly ILogger<WebSocketHandler> _logger;
 
     /// <summary>Maximum allowed size for a single WebSocket message (64 KB).</summary>
@@ -30,10 +32,12 @@ public sealed class WebSocketHandler
     public WebSocketHandler(
         MessageRouter router,
         IConnectionManager connectionManager,
+        IIdempotencyStore idempotencyStore,
         ILogger<WebSocketHandler> logger)
     {
         _router = router;
         _connectionManager = connectionManager;
+        _idempotencyStore = idempotencyStore;
         _logger = logger;
     }
 
@@ -164,29 +168,64 @@ public sealed class WebSocketHandler
             return MessageEnvelope.ErrorResponse(responseType, $"Unknown message type: {envelope.Type}");
         }
 
+        // Idempotency check: skip Login (idempotent by nature) and messages without a RequestId
+        if (!string.IsNullOrEmpty(envelope.RequestId)
+            && !string.Equals(envelope.Type, "Login", StringComparison.OrdinalIgnoreCase))
+        {
+            var cached = _idempotencyStore.GetCachedResponse(envelope.RequestId);
+            if (cached is not null)
+            {
+                _logger.LogInformation("Duplicate request {RequestId} for {MessageType}, returning cached response",
+                    envelope.RequestId, envelope.Type);
+                return JsonSerializer.Deserialize<MessageEnvelope>(cached, SerializerOptions.Default)!;
+            }
+
+            if (!_idempotencyStore.TryMarkAsProcessing(envelope.RequestId))
+            {
+                _logger.LogWarning("Request {RequestId} is already being processed", envelope.RequestId);
+                return MessageEnvelope.ErrorResponse(responseType, "Request is already being processed");
+            }
+        }
+
         try
         {
             var rawPayload = envelope.Payload?.GetRawText() ?? "{}";
             var result = await handler.HandleAsync(playerId, rawPayload, socket, cancellationToken);
-            return MessageEnvelope.SuccessResponse(responseType, result);
+            var response = MessageEnvelope.SuccessResponse(responseType, result);
+            CacheResponse(envelope.RequestId, response);
+            return response;
         }
         catch (InvalidOperationException ex)
         {
             // Business rule violations (insufficient funds, already connected, etc.)
             _logger.LogWarning("{MessageType} rejected: {Reason}", envelope.Type, ex.Message);
-            return MessageEnvelope.ErrorResponse(responseType, ex.Message);
+            var response = MessageEnvelope.ErrorResponse(responseType, ex.Message);
+            CacheResponse(envelope.RequestId, response);
+            return response;
         }
         catch (ArgumentException ex)
         {
             // Validation errors (invalid payload, missing fields, etc.)
             _logger.LogWarning("{MessageType} validation failed: {Reason}", envelope.Type, ex.Message);
-            return MessageEnvelope.ErrorResponse(responseType, ex.Message);
+            var response = MessageEnvelope.ErrorResponse(responseType, ex.Message);
+            CacheResponse(envelope.RequestId, response);
+            return response;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error handling {MessageType}", envelope.Type);
             return MessageEnvelope.ErrorResponse(responseType, "An internal error occurred");
         }
+    }
+
+    /// <summary>
+    /// Caches the response for a request ID so duplicate requests return the same result.
+    /// </summary>
+    private void CacheResponse(string? requestId, MessageEnvelope response)
+    {
+        if (string.IsNullOrEmpty(requestId)) return;
+        var json = JsonSerializer.Serialize(response, SerializerOptions.Default);
+        _idempotencyStore.SetResponse(requestId, json);
     }
 
     /// <summary>

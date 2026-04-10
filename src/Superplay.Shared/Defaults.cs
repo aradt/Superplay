@@ -23,4 +23,10 @@ public static class Defaults
 
     /// <summary>Full WebSocket URL the client connects to by default.</summary>
     public const string ClientWebSocketUrl = "ws://localhost:5000/ws";
+
+    /// <summary>Default idempotency TTL in seconds (5 minutes).</summary>
+    public const int IdempotencyTtlSeconds = 300;
+
+    /// <summary>Default idempotency cleanup interval in seconds (1 minute).</summary>
+    public const int IdempotencyCleanupIntervalSeconds = 60;
 }

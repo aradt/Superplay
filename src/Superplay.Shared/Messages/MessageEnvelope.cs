@@ -14,6 +14,13 @@ public sealed record MessageEnvelope
     [JsonPropertyName("type")]
     public required string Type { get; init; }
 
+    /// <summary>
+    /// Unique request identifier for idempotency. The server uses this to detect and reject
+    /// duplicate requests, returning the cached response instead of re-executing the handler.
+    /// </summary>
+    [JsonPropertyName("requestId")]
+    public string? RequestId { get; init; }
+
     /// <summary>Serialized message body. Null for error responses that carry no payload.</summary>
     [JsonPropertyName("payload")]
     public JsonElement? Payload { get; init; }
@@ -35,7 +42,7 @@ public sealed record MessageEnvelope
     public static MessageEnvelope Request(string type, object payload)
     {
         var json = JsonSerializer.SerializeToElement(payload, SerializerOptions.Default);
-        return new MessageEnvelope { Type = type, Payload = json };
+        return new MessageEnvelope { Type = type, Payload = json, RequestId = Guid.NewGuid().ToString("N") };
     }
 
     /// <summary>

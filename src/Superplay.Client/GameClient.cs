@@ -168,6 +168,38 @@ public sealed class GameClient : IDisposable
     }
 
     /// <summary>
+    /// Sends a pre-built envelope and waits for the response. Used for idempotency testing
+    /// where the same RequestId must be sent multiple times.
+    /// </summary>
+    public async Task<MessageEnvelope?> SendRawEnvelopeAsync(MessageEnvelope envelope, CancellationToken cancellationToken = default)
+    {
+        var json = JsonSerializer.Serialize(envelope, SerializerOptions.Default);
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            _logger.Debug("Sending raw {MessageType} request (RequestId: {RequestId})", envelope.Type, envelope.RequestId);
+            await _socket.SendAsync(
+                new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+
+        try
+        {
+            return await _responseChannel.Reader.ReadAsync(cancellationToken);
+        }
+        catch (ChannelClosedException)
+        {
+            _logger.Error("Connection closed while waiting for response");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Sends a request and waits for the corresponding response from the background read loop.
     /// Uses a SemaphoreSlim to prevent interleaved WebSocket writes.
     /// </summary>

@@ -26,13 +26,16 @@ try
     var storageProvider = builder.Configuration.GetValue<string>("Storage:Provider")
                           ?? Defaults.StorageProvider;
 
-    if (string.Equals(storageProvider, "Redis", StringComparison.OrdinalIgnoreCase))
+    var isRedis = string.Equals(storageProvider, "Redis", StringComparison.OrdinalIgnoreCase);
+
+    if (isRedis)
     {
         var redisConnectionString = builder.Configuration.GetValue<string>("Redis:ConnectionString")
                                     ?? Defaults.RedisConnectionString;
         builder.Services.AddSingleton<IConnectionMultiplexer>(
             ConnectionMultiplexer.Connect(redisConnectionString));
         builder.Services.AddSingleton<IPlayerRepository, RedisPlayerRepository>();
+        builder.Services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
         Log.Information("Storage provider: Redis ({ConnectionString})", redisConnectionString);
     }
     else
@@ -42,6 +45,7 @@ try
         builder.Services.AddDbContext<GameDbContext>(options =>
             options.UseSqlite(sqliteConnectionString));
         builder.Services.AddSingleton<IPlayerRepository, SqlitePlayerRepository>();
+        builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
         Log.Information("Storage provider: SQLite ({ConnectionString})", sqliteConnectionString);
     }
 
