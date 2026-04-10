@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Superplay.Server.Networking;
 using Superplay.Server.Routing;
 using Superplay.Server.Services;
+using Superplay.Shared;
 using Superplay.Shared.Messages;
 
 namespace Superplay.Server.Handlers;
@@ -46,6 +47,11 @@ public sealed class LoginHandler : IMessageHandler
         if (request is null || string.IsNullOrWhiteSpace(request.DeviceId))
         {
             throw new ArgumentException("DeviceId is required");
+        }
+
+        if (request.DeviceId.Length > Defaults.MaxDeviceIdLength)
+        {
+            throw new ArgumentException($"DeviceId must not exceed {Defaults.MaxDeviceIdLength} characters");
         }
 
         _logger.LogInformation("Login attempt for device {DeviceId}", request.DeviceId);

@@ -5,6 +5,7 @@ using Moq;
 using Superplay.Server.Handlers;
 using Superplay.Server.Networking;
 using Superplay.Server.Services;
+using Superplay.Shared;
 using Superplay.Shared.Messages;
 
 namespace Superplay.Tests.Handlers;
@@ -130,5 +131,34 @@ public sealed class LoginHandlerTests
         await _sut.HandleAsync(null, SerializePayload(request), _socketMock.Object, CancellationToken.None);
 
         _connMock.Verify(c => c.IsOnline(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleAsync_DeviceIdTooLong_ThrowsArgumentException()
+    {
+        var request = new LoginRequest { DeviceId = new string('x', Defaults.MaxDeviceIdLength + 1) };
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+            _sut.HandleAsync(null, SerializePayload(request), _socketMock.Object, CancellationToken.None));
+
+        Assert.Contains("must not exceed 256 characters", exception.Message);
+    }
+
+    [Fact]
+    public async Task HandleAsync_DeviceIdAtMaxLength_Succeeds()
+    {
+        var deviceId = new string('x', Defaults.MaxDeviceIdLength);
+        var request = new LoginRequest { DeviceId = deviceId };
+        _repoMock.Setup(r => r.GetPlayerIdByDeviceAsync(deviceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string?)null);
+        _repoMock.Setup(r => r.CreatePlayerAsync(deviceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync("player-max-device");
+
+        var result = await _sut.HandleAsync(null, SerializePayload(request), _socketMock.Object, CancellationToken.None);
+
+        var response = Assert.IsType<LoginResponse>(result);
+        Assert.Equal("player-max-device", response.PlayerId);
+        Assert.Equal(0, response.Coins);
+        Assert.Equal(0, response.Rolls);
     }
 }

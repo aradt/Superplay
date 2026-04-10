@@ -164,4 +164,17 @@ public sealed class UpdateResourcesHandlerTests
         Assert.Equal(ResourceType.Coins, response.ResourceType);
         Assert.Equal(500, response.NewBalance);
     }
+
+    [Fact]
+    public async Task HandleAsync_PositiveDelta_WouldExceedMaxBalance_ThrowsInvalidOperation()
+    {
+        var request = new UpdateResourcesRequest { ResourceType = ResourceType.Coins, ResourceValue = 999_999_999_999 };
+        _repoMock.Setup(r => r.UpdateResourceAsync("player-1", ResourceType.Coins, 999_999_999_999, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(-2);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _sut.HandleAsync("player-1", SerializePayload(request), _socketMock.Object, CancellationToken.None));
+
+        Assert.Contains("would exceed the maximum allowed balance", exception.Message);
+    }
 }
