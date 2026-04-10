@@ -31,6 +31,7 @@ public interface IPlayerRepository
 
     /// <summary>
     /// Atomically increments (or decrements) a resource and returns the new balance.
+    /// Returns -1 if the update would result in a negative balance (floor of zero enforced).
     /// </summary>
     Task<long> UpdateResourceAsync(string playerId, ResourceType resourceType, long delta, CancellationToken cancellationToken = default);
 

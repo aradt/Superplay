@@ -19,6 +19,20 @@ public sealed class RedisPlayerRepository : IPlayerRepository
     private readonly IConnectionMultiplexer _redis;
     private readonly ILogger<RedisPlayerRepository> _logger;
 
+    // Lua script for atomic resource update with floor of zero:
+    // KEYS[1] = player hash
+    // ARGV[1] = resource field name, ARGV[2] = delta
+    // Returns: new balance, or -1 if the update would go below zero
+    private const string UpdateScript = """
+        local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
+        local delta = tonumber(ARGV[2])
+        local newBalance = current + delta
+        if newBalance < 0 then
+            return -1
+        end
+        return redis.call('HINCRBY', KEYS[1], ARGV[1], delta)
+        """;
+
     // Lua script for atomic gift transfer:
     // KEYS[1] = sender player hash, KEYS[2] = recipient player hash
     // ARGV[1] = resource field name, ARGV[2] = transfer amount
@@ -54,21 +68,29 @@ public sealed class RedisPlayerRepository : IPlayerRepository
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Uses a Redis transaction (MULTI/EXEC) to atomically create both the
+    /// device-to-player mapping and the player hash. Either both keys are set or neither.
+    /// </remarks>
     public async Task<string> CreatePlayerAsync(string deviceId, CancellationToken cancellationToken = default)
     {
         var playerId = Guid.NewGuid().ToString("N");
 
-        var batch = Db.CreateBatch();
+        var transaction = Db.CreateTransaction();
 
-        var setDeviceTask = batch.StringSetAsync(DeviceKey(deviceId), playerId);
-        var setPlayerTask = batch.HashSetAsync(PlayerKey(playerId), new[]
+        var setDeviceTask = transaction.StringSetAsync(DeviceKey(deviceId), playerId);
+        var setPlayerTask = transaction.HashSetAsync(PlayerKey(playerId), new[]
         {
             new HashEntry("deviceId", deviceId),
             new HashEntry("coins", 0),
             new HashEntry("rolls", 0)
         });
 
-        batch.Execute();
+        var committed = await transaction.ExecuteAsync();
+        if (!committed)
+        {
+            throw new InvalidOperationException($"Failed to create player for device {deviceId}");
+        }
 
         await setDeviceTask;
         await setPlayerTask;
@@ -94,15 +116,30 @@ public sealed class RedisPlayerRepository : IPlayerRepository
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Uses a Lua script to atomically check that the balance won't go below zero before applying the delta.
+    /// Returns -1 if the update would result in a negative balance.
+    /// </remarks>
     public async Task<long> UpdateResourceAsync(string playerId, ResourceType resourceType, long delta, CancellationToken cancellationToken = default)
     {
-        var newBalance = await Db.HashIncrementAsync(PlayerKey(playerId), ResourceField(resourceType), delta);
+        var result = (long)await Db.ScriptEvaluateAsync(
+            UpdateScript,
+            new RedisKey[] { PlayerKey(playerId) },
+            new RedisValue[] { ResourceField(resourceType), delta });
+
+        if (result == -1)
+        {
+            _logger.LogWarning(
+                "Update rejected: player {PlayerId} {ResourceType} would go below zero (delta={Delta})",
+                playerId, resourceType, delta);
+            return -1;
+        }
 
         _logger.LogDebug(
             "Updated {ResourceType} for player {PlayerId}: delta={Delta}, newBalance={NewBalance}",
-            resourceType, playerId, delta, newBalance);
+            resourceType, playerId, delta, result);
 
-        return newBalance;
+        return result;
     }
 
     /// <inheritdoc />

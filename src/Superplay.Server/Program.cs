@@ -41,7 +41,7 @@ try
                                      ?? Defaults.SqliteConnectionString;
         builder.Services.AddDbContext<GameDbContext>(options =>
             options.UseSqlite(sqliteConnectionString));
-        builder.Services.AddScoped<IPlayerRepository, SqlitePlayerRepository>();
+        builder.Services.AddSingleton<IPlayerRepository, SqlitePlayerRepository>();
         Log.Information("Storage provider: SQLite ({ConnectionString})", sqliteConnectionString);
     }
 

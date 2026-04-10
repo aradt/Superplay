@@ -121,4 +121,47 @@ public sealed class UpdateResourcesHandlerTests
 
         _repoMock.Verify(r => r.UpdateResourceAsync("player-42", ResourceType.Rolls, 7, It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task HandleAsync_NegativeDelta_WouldGoBelowZero_ThrowsInvalidOperation()
+    {
+        var request = new UpdateResourcesRequest { ResourceType = ResourceType.Coins, ResourceValue = -100 };
+        _repoMock.Setup(r => r.UpdateResourceAsync("player-1", ResourceType.Coins, -100, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(-1);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _sut.HandleAsync("player-1", SerializePayload(request), _socketMock.Object, CancellationToken.None));
+
+        Assert.Contains("Insufficient Coins", exception.Message);
+        Assert.Contains("-100", exception.Message);
+        Assert.Contains("negative balance", exception.Message);
+    }
+
+    [Fact]
+    public async Task HandleAsync_NegativeDelta_BalanceStaysAtZero_Succeeds()
+    {
+        var request = new UpdateResourcesRequest { ResourceType = ResourceType.Rolls, ResourceValue = -10 };
+        _repoMock.Setup(r => r.UpdateResourceAsync("player-1", ResourceType.Rolls, -10, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(0);
+
+        var result = await _sut.HandleAsync("player-1", SerializePayload(request), _socketMock.Object, CancellationToken.None);
+
+        var response = Assert.IsType<UpdateResourcesResponse>(result);
+        Assert.Equal(ResourceType.Rolls, response.ResourceType);
+        Assert.Equal(0, response.NewBalance);
+    }
+
+    [Fact]
+    public async Task HandleAsync_PositiveDelta_AlwaysSucceeds()
+    {
+        var request = new UpdateResourcesRequest { ResourceType = ResourceType.Coins, ResourceValue = 500 };
+        _repoMock.Setup(r => r.UpdateResourceAsync("player-1", ResourceType.Coins, 500, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(500);
+
+        var result = await _sut.HandleAsync("player-1", SerializePayload(request), _socketMock.Object, CancellationToken.None);
+
+        var response = Assert.IsType<UpdateResourcesResponse>(result);
+        Assert.Equal(ResourceType.Coins, response.ResourceType);
+        Assert.Equal(500, response.NewBalance);
+    }
 }

@@ -170,10 +170,22 @@ public sealed class WebSocketHandler
             var result = await handler.HandleAsync(playerId, rawPayload, socket, cancellationToken);
             return MessageEnvelope.SuccessResponse(responseType, result);
         }
+        catch (InvalidOperationException ex)
+        {
+            // Business rule violations (insufficient funds, already connected, etc.)
+            _logger.LogWarning("{MessageType} rejected: {Reason}", envelope.Type, ex.Message);
+            return MessageEnvelope.ErrorResponse(responseType, ex.Message);
+        }
+        catch (ArgumentException ex)
+        {
+            // Validation errors (invalid payload, missing fields, etc.)
+            _logger.LogWarning("{MessageType} validation failed: {Reason}", envelope.Type, ex.Message);
+            return MessageEnvelope.ErrorResponse(responseType, ex.Message);
+        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Handler error for {MessageType}", envelope.Type);
-            return MessageEnvelope.ErrorResponse(responseType, ex.Message);
+            _logger.LogError(ex, "Unexpected error handling {MessageType}", envelope.Type);
+            return MessageEnvelope.ErrorResponse(responseType, "An internal error occurred");
         }
     }
 

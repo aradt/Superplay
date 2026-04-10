@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Superplay.Shared.Enums;
 
@@ -10,27 +11,36 @@ namespace Superplay.Server.Services;
 /// Table schema:
 ///   Players (PlayerId PK, DeviceId UNIQUE, Coins, Rolls)
 ///
+/// Registered as a Singleton. Creates a new DbContext per operation via
+/// IServiceScopeFactory to avoid thread-safety issues with EF Core's DbContext.
 /// Uses explicit transactions for atomic cross-player transfers.
-/// SQLite is single-writer, so concurrent writes are serialized at the database level.
 /// </summary>
 public sealed class SqlitePlayerRepository : IPlayerRepository
 {
-    private readonly GameDbContext _db;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SqlitePlayerRepository> _logger;
 
     /// <summary>
-    /// Initializes the repository with a database context and logger.
+    /// Initializes the repository with a scope factory (for creating DbContext instances) and logger.
     /// </summary>
-    public SqlitePlayerRepository(GameDbContext db, ILogger<SqlitePlayerRepository> logger)
+    public SqlitePlayerRepository(IServiceScopeFactory scopeFactory, ILogger<SqlitePlayerRepository> logger)
     {
-        _db = db;
+        _scopeFactory = scopeFactory;
         _logger = logger;
+    }
+
+    /// <summary>Creates a new scoped DbContext for a single operation.</summary>
+    private GameDbContext CreateDbContext()
+    {
+        var scope = _scopeFactory.CreateScope();
+        return scope.ServiceProvider.GetRequiredService<GameDbContext>();
     }
 
     /// <inheritdoc />
     public async Task<string?> GetPlayerIdByDeviceAsync(string deviceId, CancellationToken cancellationToken = default)
     {
-        var player = await _db.Players
+        await using var db = CreateDbContext();
+        var player = await db.Players
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.DeviceId == deviceId, cancellationToken);
 
@@ -40,9 +50,10 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
     /// <inheritdoc />
     public async Task<string> CreatePlayerAsync(string deviceId, CancellationToken cancellationToken = default)
     {
+        await using var db = CreateDbContext();
         var playerId = Guid.NewGuid().ToString("N");
 
-        _db.Players.Add(new PlayerEntity
+        db.Players.Add(new PlayerEntity
         {
             PlayerId = playerId,
             DeviceId = deviceId,
@@ -50,7 +61,7 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
             Rolls = 0
         });
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("Created player {PlayerId} for device {DeviceId}", playerId, deviceId);
         return playerId;
@@ -59,7 +70,8 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
     /// <inheritdoc />
     public async Task<long> GetResourceAsync(string playerId, ResourceType resourceType, CancellationToken cancellationToken = default)
     {
-        var player = await _db.Players
+        await using var db = CreateDbContext();
+        var player = await db.Players
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.PlayerId == playerId, cancellationToken);
 
@@ -77,7 +89,8 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
     /// <inheritdoc />
     public async Task<(long Coins, long Rolls)> GetAllResourcesAsync(string playerId, CancellationToken cancellationToken = default)
     {
-        var player = await _db.Players
+        await using var db = CreateDbContext();
+        var player = await db.Players
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.PlayerId == playerId, cancellationToken);
 
@@ -88,24 +101,38 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Uses a conditional UPDATE to ensure the balance won't go below zero.
+    /// Returns -1 if the update would result in a negative balance.
+    /// </remarks>
     public async Task<long> UpdateResourceAsync(string playerId, ResourceType resourceType, long delta, CancellationToken cancellationToken = default)
     {
-        // Use raw SQL for atomic increment — avoids read-modify-write race conditions.
+        await using var db = CreateDbContext();
         var fieldName = ResourceField(resourceType);
 
-        var rowsAffected = await _db.Database.ExecuteSqlRawAsync(
-            "UPDATE Players SET " + fieldName + " = " + fieldName + " + {0} WHERE PlayerId = {1}",
+        // Conditional update: only apply if result >= 0
+        var rowsAffected = await db.Database.ExecuteSqlRawAsync(
+            "UPDATE Players SET " + fieldName + " = " + fieldName + " + {0} WHERE PlayerId = {1} AND " + fieldName + " + {0} >= 0",
             new object[] { delta, playerId },
             cancellationToken);
 
         if (rowsAffected == 0)
         {
-            _logger.LogWarning("UpdateResource failed: player {PlayerId} not found", playerId);
-            return 0;
+            // Check if player exists to distinguish "not found" from "would go negative"
+            var exists = await db.Players.AsNoTracking().AnyAsync(p => p.PlayerId == playerId, cancellationToken);
+            if (!exists)
+            {
+                _logger.LogWarning("UpdateResource failed: player {PlayerId} not found", playerId);
+                return 0;
+            }
+
+            _logger.LogWarning(
+                "Update rejected: player {PlayerId} {ResourceType} would go below zero (delta={Delta})",
+                playerId, resourceType, delta);
+            return -1;
         }
 
-        // Read back the new balance.
-        var newBalance = await _db.Players
+        var newBalance = await db.Players
             .AsNoTracking()
             .Where(p => p.PlayerId == playerId)
             .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
@@ -126,14 +153,14 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
         long amount,
         CancellationToken cancellationToken = default)
     {
+        await using var db = CreateDbContext();
         var fieldName = ResourceField(resourceType);
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            // Read sender's current balance inside the transaction.
-            var senderBalance = await _db.Players
+            var senderBalance = await db.Players
                 .Where(p => p.PlayerId == fromPlayerId)
                 .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
                 .FirstOrDefaultAsync(cancellationToken);
@@ -147,26 +174,23 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
                 return null;
             }
 
-            // Debit sender.
-            await _db.Database.ExecuteSqlRawAsync(
+            await db.Database.ExecuteSqlRawAsync(
                 "UPDATE Players SET " + fieldName + " = " + fieldName + " - {0} WHERE PlayerId = {1}",
                 new object[] { amount, fromPlayerId },
                 cancellationToken);
 
-            // Credit recipient.
-            await _db.Database.ExecuteSqlRawAsync(
+            await db.Database.ExecuteSqlRawAsync(
                 "UPDATE Players SET " + fieldName + " = " + fieldName + " + {0} WHERE PlayerId = {1}",
                 new object[] { amount, toPlayerId },
                 cancellationToken);
 
-            // Read back new balances.
-            var senderNew = await _db.Players
+            var senderNew = await db.Players
                 .AsNoTracking()
                 .Where(p => p.PlayerId == fromPlayerId)
                 .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
                 .FirstOrDefaultAsync(cancellationToken);
 
-            var recipientNew = await _db.Players
+            var recipientNew = await db.Players
                 .AsNoTracking()
                 .Where(p => p.PlayerId == toPlayerId)
                 .Select(p => resourceType == ResourceType.Coins ? p.Coins : p.Rolls)
@@ -190,7 +214,8 @@ public sealed class SqlitePlayerRepository : IPlayerRepository
     /// <inheritdoc />
     public async Task<bool> PlayerExistsAsync(string playerId, CancellationToken cancellationToken = default)
     {
-        return await _db.Players
+        await using var db = CreateDbContext();
+        return await db.Players
             .AsNoTracking()
             .AnyAsync(p => p.PlayerId == playerId, cancellationToken);
     }

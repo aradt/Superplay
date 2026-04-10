@@ -29,11 +29,13 @@ public sealed class GameDbContext : DbContext
                 .IsUnique();
 
             entity.Property(e => e.PlayerId)
-                .HasMaxLength(32);
+                .HasMaxLength(32)
+                .UseCollation("NOCASE");
 
             entity.Property(e => e.DeviceId)
                 .IsRequired()
-                .HasMaxLength(256);
+                .HasMaxLength(256)
+                .UseCollation("NOCASE");
 
             entity.Property(e => e.Coins)
                 .HasDefaultValue(0L);

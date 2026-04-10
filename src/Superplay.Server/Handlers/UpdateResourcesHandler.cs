@@ -51,6 +51,12 @@ public sealed class UpdateResourcesHandler : IMessageHandler
         var newBalance = await _playerRepository.UpdateResourceAsync(
             playerId, request.ResourceType, request.ResourceValue, cancellationToken);
 
+        if (newBalance == -1)
+        {
+            throw new InvalidOperationException(
+                $"Insufficient {request.ResourceType}: update of {request.ResourceValue} would result in a negative balance");
+        }
+
         _logger.LogInformation(
             "Player {PlayerId} updated {ResourceType} by {Delta}, new balance: {NewBalance}",
             playerId, request.ResourceType, request.ResourceValue, newBalance);

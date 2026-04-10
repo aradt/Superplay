@@ -209,7 +209,7 @@ public sealed class GameClient : IDisposable
 
         if (response.Success != true)
         {
-            _logger.Error("Server error for {MessageType}: {Error}", messageType, response.Error);
+            _logger.Warning("{MessageType}: {Error}", messageType, response.Error);
             return null;
         }
 
